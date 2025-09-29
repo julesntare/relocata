@@ -18,12 +18,12 @@ class ARMeasurementScreen extends StatefulWidget {
 class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
   final ARMeasurementService _arService = ARMeasurementService();
 
-  double? _currentMeasurement;
   Map<String, double>? _finalMeasurements;
   String _instructionText = 'Move camera slowly over furniture until yellow planes appear, then tap Start';
   bool _isARReady = false;
   bool _isMeasuring = false;
   String? _errorMessage;
+  int _pointsPlaced = 0;
 
   @override
   void initState() {
@@ -39,15 +39,22 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
 
   void _initializeAR() async {
     _arService.onError = (error) {
-      setState(() {
-        _errorMessage = error;
-      });
+      // Show temporary error message instead of permanent error state
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     };
 
-    _arService.onMeasurementUpdate = (distance) {
+    _arService.onPointPlaced = (instruction, pointCount) {
       setState(() {
-        _currentMeasurement = distance;
-        _instructionText = 'Good! Now TAP on the yellow plane at the other end of furniture';
+        _pointsPlaced = pointCount;
+        _instructionText = instruction;
       });
     };
 
@@ -191,6 +198,22 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  'Progress: $_pointsPlaced/4 points placed',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             ],
           ],
         ),
@@ -214,7 +237,7 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
                 ? Colors.orange
                 : Theme.of(context).colorScheme.primary,
           ),
-          if (_currentMeasurement != null || _finalMeasurements != null)
+          if (_finalMeasurements != null || _pointsPlaced >= 2)
             FloatingActionButton.extended(
               onPressed: _saveMeasurements,
               icon: const Icon(Icons.save),
@@ -305,8 +328,8 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
   void _startMeasurement() {
     setState(() {
       _isMeasuring = true;
-      _instructionText = 'TAP on the yellow plane where furniture edge starts';
-      _currentMeasurement = null;
+      _instructionText = 'TAP on the yellow plane where WIDTH starts (Point 1/4)';
+      _pointsPlaced = 0;
       _finalMeasurements = null;
     });
     _arService.startMeasurement();
@@ -316,7 +339,7 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
     setState(() {
       _isMeasuring = false;
       _instructionText = 'Move camera slowly over furniture until yellow planes appear, then tap Start';
-      _currentMeasurement = null;
+      _pointsPlaced = 0;
       _finalMeasurements = null;
     });
     _arService.resetMeasurement();
@@ -328,12 +351,31 @@ class _ARMeasurementScreenState extends State<ARMeasurementScreen> {
         'width': _finalMeasurements!['width'],
         'height': _finalMeasurements!['height'],
       });
-    } else if (_currentMeasurement != null) {
-      // If we only have one measurement, treat it as width
-      Navigator.of(context).pop({
-        'width': _currentMeasurement,
-        'height': null,
-      });
+    } else if (_pointsPlaced >= 2) {
+      // Show message that measurement is incomplete but can be saved as partial
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Incomplete Measurement'),
+          content: Text('Only $_pointsPlaced/4 points placed. Save as partial measurement?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.of(context).pop({
+                  'width': null,
+                  'height': null,
+                });
+              },
+              child: const Text('Save Anyway'),
+            ),
+          ],
+        ),
+      );
     }
   }
 }

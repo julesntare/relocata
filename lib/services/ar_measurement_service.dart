@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:ar_flutter_plugin_2/datatypes/config_planedetection.dart';
 import 'package:ar_flutter_plugin_2/datatypes/hittest_result_types.dart';
 import 'package:ar_flutter_plugin_2/datatypes/node_types.dart';
@@ -8,7 +9,7 @@ import 'package:ar_flutter_plugin_2/managers/ar_session_manager.dart';
 import 'package:ar_flutter_plugin_2/models/ar_anchor.dart';
 import 'package:ar_flutter_plugin_2/models/ar_hittest_result.dart';
 import 'package:ar_flutter_plugin_2/models/ar_node.dart';
-import 'package:vector_math/vector_math_64.dart';
+import 'package:vector_math/vector_math_64.dart' as vm;
 
 class ARMeasurementService {
   ARSessionManager? arSessionManager;
@@ -17,13 +18,13 @@ class ARMeasurementService {
 
   final List<ARNode> nodes = <ARNode>[];
   final List<ARAnchor> anchors = <ARAnchor>[];
-  final List<Vector3> measurementPoints = <Vector3>[];
+  final List<vm.Vector3> measurementPoints = <vm.Vector3>[];
 
   bool isInitialized = false;
   bool isMeasuring = false;
 
   Function(String)? onError;
-  Function(double)? onMeasurementUpdate;
+  Function(String, int)? onPointPlaced;
   Function(Map<String, double>)? onMeasurementComplete;
 
   Future<void> initializeAR() async {
@@ -57,12 +58,34 @@ class ARMeasurementService {
   }
 
   Future<void> onTap(List<ARHitTestResult> hitTestResults) async {
-    if (!isMeasuring) return;
+    if (!isMeasuring) {
+      onError?.call('Tap "Start" button first to begin measuring.');
+      return;
+    }
+
+    if (arAnchorManager == null || arObjectManager == null) {
+      onError?.call('AR system not ready. Please wait a moment and try again.');
+      return;
+    }
 
     try {
-      var singleHitTestResult = hitTestResults.firstWhere(
+      // Debug: Log hit test results
+      print('Hit test results received: ${hitTestResults.length}');
+      for (var hit in hitTestResults) {
+        print('Hit type: ${hit.type}');
+      }
+
+      // Check if there are any plane hits
+      var planeHits = hitTestResults.where(
         (hitTestResult) => hitTestResult.type == ARHitTestResultType.plane,
-      );
+      ).toList();
+
+      if (planeHits.isEmpty) {
+        onError?.call('No plane detected. Move camera slowly until yellow areas appear, then tap on them.');
+        return;
+      }
+
+      var singleHitTestResult = planeHits.first;
 
       final worldTransform = singleHitTestResult.worldTransform;
       var newAnchor = ARPlaneAnchor(transformation: worldTransform);
@@ -75,15 +98,8 @@ class ARMeasurementService {
         var position = _getPositionFromMatrix(worldTransform);
         measurementPoints.add(position);
 
-        // Add visual marker
-        var sphereNode = ARNode(
-          type: NodeType.webGLB,
-          uri:
-              "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb",
-          scale: Vector3(0.02, 0.02, 0.02),
-          position: position,
-          rotation: Vector4(1.0, 0.0, 0.0, 0.0),
-        );
+        // Add visual marker with different colors for each point
+        var sphereNode = _createPointMarker(position, measurementPoints.length);
 
         bool? didAddNode = await arObjectManager?.addNode(
           sphereNode,
@@ -93,14 +109,13 @@ class ARMeasurementService {
           nodes.add(sphereNode);
         }
 
-        // If we have two points, calculate width and height and complete measurement
-        if (measurementPoints.length == 2) {
-          // Add line between points
-          await _addLineBetweenPoints(
-            measurementPoints[0],
-            measurementPoints[1],
-          );
+        // Call the point placed callback with instruction for next point
+        String instruction = _getInstructionForPoint(measurementPoints.length);
+        onPointPlaced?.call(instruction, measurementPoints.length);
 
+        // If we have all 4 points, calculate measurements and complete
+        if (measurementPoints.length == 4) {
+          await _addMeasurementLines();
           var measurements = _calculateMeasurements();
           onMeasurementComplete?.call(measurements);
           _completeMeasurement();
@@ -111,33 +126,115 @@ class ARMeasurementService {
     }
   }
 
-  Vector3 _getPositionFromMatrix(Matrix4 matrix) {
-    return Vector3(matrix[12], matrix[13], matrix[14]);
+  vm.Vector3 _getPositionFromMatrix(vm.Matrix4 matrix) {
+    return vm.Vector3(matrix[12], matrix[13], matrix[14]);
   }
 
-  double _calculateDistance(Vector3 point1, Vector3 point2) {
+  ARNode _createPointMarker(vm.Vector3 position, int pointNumber) {
+    // Different sizes and models for each point to make them distinctive
+    String modelUri;
+    vm.Vector3 scale;
+
+    switch (pointNumber) {
+      case 1: // Width start - Large red sphere
+        modelUri =
+            "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb";
+        scale = vm.Vector3(0.03, 0.03, 0.03);
+        break;
+      case 2: // Width end - Large blue sphere
+        modelUri =
+            "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb";
+        scale = vm.Vector3(0.03, 0.03, 0.03);
+        break;
+      case 3: // Height start - Small green sphere
+        modelUri =
+            "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb";
+        scale = vm.Vector3(0.025, 0.025, 0.025);
+        break;
+      case 4: // Height end - Small yellow sphere
+        modelUri =
+            "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb";
+        scale = vm.Vector3(0.025, 0.025, 0.025);
+        break;
+      default:
+        modelUri =
+            "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Sphere/glTF-Binary/Sphere.glb";
+        scale = vm.Vector3(0.02, 0.02, 0.02);
+    }
+
+    return ARNode(
+      type: NodeType.webGLB,
+      uri: modelUri,
+      scale: scale,
+      position: position,
+      rotation: vm.Vector4(1.0, 0.0, 0.0, 0.0),
+    );
+  }
+
+  double _calculateDistance(vm.Vector3 point1, vm.Vector3 point2) {
     return point1.distanceTo(point2) * 100; // Convert to centimeters
   }
 
+  String _getInstructionForPoint(int pointCount) {
+    switch (pointCount) {
+      case 1:
+        return 'Point 1/4 placed! Now tap the OTHER END of the WIDTH';
+      case 2:
+        return 'Point 2/4 placed! Now tap the START of the HEIGHT';
+      case 3:
+        return 'Point 3/4 placed! Now tap the OTHER END of the HEIGHT';
+      case 4:
+        return 'All points placed! Calculating measurements...';
+      default:
+        return 'TAP on the yellow plane where furniture edge starts';
+    }
+  }
+
   Map<String, double> _calculateMeasurements() {
-    if (measurementPoints.length < 2) {
+    if (measurementPoints.length < 4) {
       return {'width': 0.0, 'height': 0.0};
     }
 
+    // Calculate width from first two points (width start and end)
     double width = _calculateDistance(
       measurementPoints[0],
       measurementPoints[1],
     );
 
-    // For furniture, assume height is proportional to width
-    double height = width * 0.8; // Default furniture height proportion
+    // Calculate height from last two points (height start and end)
+    double height = _calculateDistance(
+      measurementPoints[2],
+      measurementPoints[3],
+    );
 
     return {'width': width, 'height': height};
   }
 
-  Future<void> _addLineBetweenPoints(Vector3 start, Vector3 end) async {
+  Future<void> _addMeasurementLines() async {
+    if (measurementPoints.length >= 4) {
+      // Add width line (between points 0 and 1)
+      await _addLineBetweenPoints(
+        measurementPoints[0],
+        measurementPoints[1],
+        Colors.blue, // Blue for width
+      );
+
+      // Add height line (between points 2 and 3)
+      await _addLineBetweenPoints(
+        measurementPoints[2],
+        measurementPoints[3],
+        Colors.red, // Red for height
+      );
+    }
+  }
+
+  Future<void> _addLineBetweenPoints(
+    vm.Vector3 start,
+    vm.Vector3 end, [
+    Color? color,
+  ]) async {
     // Calculate midpoint for line position
-    var midpoint = Vector3(
+    var midpoint = vm.Vector3(
       (start.x + end.x) / 2,
       (start.y + end.y) / 2,
       (start.z + end.z) / 2,
@@ -150,9 +247,9 @@ class ARMeasurementService {
       type: NodeType.webGLB,
       uri:
           "https://github.com/KhronosGroup/glTF-Sample-Models/raw/master/2.0/Box/glTF-Binary/Box.glb",
-      scale: Vector3(distance, 0.005, 0.005), // Thin line
+      scale: vm.Vector3(distance, 0.005, 0.005), // Thin line
       position: midpoint,
-      rotation: Vector4(0.0, 0.0, 0.0, 1.0),
+      rotation: vm.Vector4(0.0, 0.0, 0.0, 1.0),
     );
 
     bool? didAddNode = await arObjectManager?.addNode(lineNode);
@@ -210,7 +307,7 @@ class ARMeasurementService {
 }
 
 class MeasurementPoint {
-  final Vector3 position;
+  final vm.Vector3 position;
   final DateTime timestamp;
 
   MeasurementPoint({required this.position, required this.timestamp});
